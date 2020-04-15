@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>主播页面</title>
+</head>
+<body>
+<video id="video" autoplay></video>
+<br>
+<span>房间id: <span th:text="${roomId}"></span></span>
+<br>
+<span>分享链接: <span id="shareUrl" ></span></span>
+<br>
+<span>主播名:</span><input id="userId" value="虎牙"/> <input id="roomId" type="hidden" th:value="${roomId}"/>
+<br>
+<button onclick="connect()">开播</button>
+<button onclick="share()">分享链接</button>
+<button onclick="disConnect()">下播</button>
+
+<div id="chat_msg_panel" style="width: 500px;height: 300px; overflow: scroll;background: lightgray;">
+</div>
+<textarea rows="3"  style="margin: 0px; height: 43px; width: 492px;" id="content"></textarea>
+
+<button onclick="sendMsg()" >发送</button>
+<button onclick="clearScreen()" >清屏</button>
+</body>
+
+<script type="text/javascript">
+    /**
+     * socket.send 数据描述
+     * event: 指令类型
+     * data: 数据
+     * name: 发送人
+     * receiver: 接收人
+     *
+     * */
+
+        //使用Google的stun服务器
+    const iceServer = {
+            "iceServers": [{
+                "url": "stun:stun.l.google.com:19302"
+            }, {
+                "url": "turn:numb.viagenie.ca",
+                "username": "webrtc@live.com",
+                "credential": "muazkh"
+            }]
+        };
+    //兼容浏览器的getUserMedia写法
+    const getUserMedia = (navigator.getUserMedia || navigator.mozGetUserMedia || navigator.webkitGetUserMedia || navigator.msGetUserMedia);
+    //兼容浏览器的PeerConnection写法
+    const PeerConnection = (window.PeerConnection ||
+        window.webkitPeerConnection00 ||
+        window.webkitRTCPeerConnection ||
+        window.RTCPeerConnection ||
+        window.mozRTCPeerConnection);
+
+    /**
+     * 信令websocket
+     * @type {WebSocket}
+     */
+    var socket;
+
+    /**
+     * 视频信息
+     * */
+    var stream_two;
+
+    /**
+     * 播放视频video组件
+     * */
+    const video = document.getElementById('video');
+
+
+    /**
+     * 连接的浏览器PeerConnection对象组
+     * {
+     *  'id':PeerConnection
+     * }
+     * @type {{}}
+     */
+    var pc = {};
+
+    var isConnected=false;
+    // 建立scoket连接
+    function connect() {
+        // 获取主播名称
+        const roomId = document.getElementById('roomId').value;
+        const userId = document.getElementById('userId').value;
+
+        if (!userId) {
+            alert("请输入主播名");
+            return;
+        }
+
+        if(isConnected){
+            alert('已连接');
+            return false;
+        }
+        isConnected=true;
+
+        /**
+         * 信令websocket
+         * @type {WebSocket}
+         */
+        socket = new WebSocket("ws://192.168.1.143:8080/websocket?roomId=" + roomId + "&userId=" + userId+ "&isMaster=" + true);
+
+        //获取本地的媒体流，并绑定到一个video标签上输出，并且发送这个媒体流给其他客户端
+        getUserMedia.call(navigator, {
+            "audio": true,
+            "video": true
+        }, function (stream) {
+            //发送offer和answer的函数，发送本地session描述
+            stream_two = stream;
+            video.srcObject = stream
+            //向PeerConnection中加入需要发送的流
+
+            //如果是发送方则发送一个offer信令，否则发送一个answer信令
+        }, function (error) {
+            //处理媒体流创建失败错误
+            alert("处理媒体流创建失败错误");
+        });
+
+        socket.close = function () {
+            console.log("连接关闭")
+        }
+
+        //有浏览器建立视频连接
+        socket.onmessage = function (event) {
+            console.info('收到报文', event)
+            var msgData = JSON.parse(event.data);
+            // 1 聊天  2 视频 3 通知
+            switch (msgData.type) {
+                case 1:
+                    handleChatData(msgData.data);
+                    break;
+                case 2:
+                    handleVideoData(msgData);
+                    break;
+                case 3:
+                    handleNotifyData(msgData.data);
+                    break;
+            }
+        };
+    }
+
+    /**
+     * 处理聊天数据
+     */
+    function handleChatData(data) {
+        var pEle = document.createElement('p');
+        pEle.textContent =data.time+" "+ data.user+":"+data.msg;
+        document.getElementById('chat_msg_panel').appendChild(pEle);
+
+    }
+
+    /**
+     * 处理通知信息
+     */
+    function handleNotifyData(data) {
+        console.info('处理通知信息', data)
+        var pEle = document.createElement('p');
+        pEle.textContent = data;
+
+       var chat_msg_panel= document.getElementById('chat_msg_panel');
+       chat_msg_panel.appendChild(pEle);
+        chat_msg_panel.scrollHeight = chat_msg_panel.scrollHeight;
+
+    }
+
+    /**
+     * 处理视频信息信息
+     */
+    function handleVideoData(event) {
+        console.info('主播 处理视频信息信息',event)
+        var json =(typeof event.data)=='string'?JSON.parse(event.data):event.data;
+        if (json.name && json.name != null && !json.event) {
+            pc[json.name] = new PeerConnection(iceServer);
+            pc[json.name].addStream(stream_two);
+            // 浏览器兼容
+            var agent = navigator.userAgent.toLowerCase();
+            if (agent.indexOf("firefox") > 0) {
+                pc[json.name].createOffer().then(function (desc) {
+                    pc[json.name].setLocalDescription(desc);
+                    sendVideo({
+                        "event": "__offer",
+                        "data": {
+                            "sdp": desc
+                        },
+                        name: json.name,
+                        receiver: json.receiver
+                    });
+                });
+            } else if (agent.indexOf("chrome") > 0) {
+                pc[json.name].createOffer(function (desc) {
+                    pc[json.name].setLocalDescription(desc);
+                    sendVideo({
+                        "event": "__offer",
+                        "data": {
+                            "sdp": desc
+                        },
+                        name: json.name,
+                        receiver: json.receiver
+                    });
+                }, (error) => {
+                    alert(error)
+                });
+            } else {
+                pc[json.name].createOffer(function (desc) {
+                    pc[json.name].setLocalDescription(desc);
+                    sendVideo({
+                        "event": "__offer",
+                        "data": {
+                            "sdp": desc
+                        },
+                        name: json.name,
+                        receiver: json.receiver
+                    });
+                }, (error) => {
+                    alert(error)
+                });
+            }
+        } else {
+            if (json.event === "__ice_candidate") {
+                //如果是一个ICE的候选，则将其加入到PeerConnection中
+                pc[json.name].addIceCandidate(new RTCIceCandidate(json.data.candidate));
+            } else if (json.event === "__answer") {
+                // 将远程session描述添加到PeerConnection中
+                pc[json.name].setRemoteDescription(new RTCSessionDescription(json.data.sdp));
+            }
+        }
+
+    }
+
+    /**
+     * 发送视频信息
+     **/
+    function sendVideo(data) {
+        const roomId = document.getElementById('roomId').value;
+        const type = 2;
+        var msgData = {roomId: roomId, type: type, data: data};
+        console.info('发送视频信息', msgData)
+        socket.send(JSON.stringify(msgData));
+    }
+
+    function sendChat(data) {
+        const roomId = document.getElementById('roomId').value;
+        const type = 1;
+        var msgData = {roomId: roomId, type: type, data: data};
+        console.info('发送聊天信息', msgData)
+        socket.send(JSON.stringify(msgData));
+    }
+
+    function sendMsg(){
+        var content=document.getElementById('content').value;
+        var userId=document.getElementById('userId').value;
+        if(!content){
+            alert('发送内容不能为空')
+            return ;
+        }
+
+        sendChat({user:userId,msg:content,time:new Date().toLocaleTimeString()});
+        document.getElementById('content').value='';
+    }
+
+    function clearScreen() {
+        document.getElementById('chat_msg_panel').innerHTML='';
+    }
+
+    function share(){
+        const roomId = document.getElementById('roomId').value;
+        var url=window.location.origin+'/webWatch?roomId='+roomId;
+        var shareUrlBtn=document.getElementById('shareUrl');
+        shareUrlBtn.innerText=url;
+        copyToClip(url)
+    }
+    /**
+     * 断开连接
+     */
+    function disConnect() {
+        socket.close();
+    }
+
+    /**
+     * 复制内容到粘贴板
+     * content : 需要复制的内容
+     * message : 复制完后的提示，不传则默认提示"复制成功"
+     */
+    function copyToClip(content, message) {
+        var aux = document.createElement("input");
+        aux.setAttribute("value", content);
+        document.body.appendChild(aux);
+        aux.select();
+        document.execCommand("copy");
+        document.body.removeChild(aux);
+        if (message == null) {
+            alert("复制成功");
+        } else{
+            alert(message);
+        }
+    }
+</script>
+</html>
